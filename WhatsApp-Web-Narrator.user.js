@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         WhatsApp Web TTS and Audio Chronological Autoplay
 // @namespace    http://tampermonkey.net/
-// @version      1.0.1
-// @description  Convierte WhatsApp Web en un audiolibro interactivo. Lee mensajes y audios cronológicamente, usando un Narrador para los nombres y voces únicas por participante.
+// @version      1.0.2
+// @description  Convierte WhatsApp Web en un audiolibro interactivo. Lee mensajes y audios cronológicamente, usando un Narrador inteligente para los nombres y voces únicas por participante.
 // @author       Alex
 // @match        https://web.whatsapp.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=whatsapp.com
@@ -42,7 +42,7 @@
                 this.voices = allVoices.slice(1);
             } else {
                 this.narratorVoice = allVoices[0] || null;
-                this.voices = allVoices;
+                this.voices = allVoices; 
             }
         },
 
@@ -65,7 +65,8 @@
         audioTimeout: null,
         currentResolve: null,
         currentRow: null,
-        nameMap: new Map(),
+        nameMap: new Map(), 
+        lastSenderName: null, // Memoria para no repetir el narrador
 
         ttsRate: 1.0,
         pauseMs: 600,
@@ -75,7 +76,8 @@
         start(firstMessageId) {
             this.isPlaying = true;
             this.isSkipping = false;
-            this.nameMap.clear();
+            this.nameMap.clear(); 
+            this.lastSenderName = null; 
             if (this.playbackControlsUi) this.playbackControlsUi.style.display = 'flex';
             console.log(`[TTS-DEBUG] 🚀 INICIANDO lectura encadenada desde: ${firstMessageId}`);
             this.process(firstMessageId);
@@ -152,6 +154,8 @@
 
             if (isAudio) {
                 console.log(`[TTS-DEBUG] 🎵 Procesando Audio...`);
+                // Si es audio, reiniciamos el último emisor para que el texto posterior sí lo anuncie
+                this.lastSenderName = null; 
                 await this.playAudio(row);
                 actionTaken = true;
             } else {
@@ -160,31 +164,37 @@
                     if (textData.hasLink) {
                         console.log(`[TTS-DEBUG] 🔗 Enlace detectado.`);
                         await this.speak(`${textData.senderName} manda un enlace.`, voiceManager.narratorVoice);
+                        this.lastSenderName = textData.senderName;
                     } else if (textData.text) {
-
+                        
                         let narratorPhrase = "";
 
-                        // Lógica del narrador para citas y menciones
+                        // Lógica inteligente de repetición
                         if (textData.isReply) {
                             if (textData.quotedName) {
-                                narratorPhrase = `${textData.senderName} respondiendo a ${textData.quotedName}`;
-                            } else {
-                                // Es un número sin nombre. Se omite el narrador completamente.
-                                narratorPhrase = "";
+                                if (textData.senderName === this.lastSenderName) {
+                                    narratorPhrase = `Respondiendo a ${textData.quotedName}`;
+                                } else {
+                                    narratorPhrase = `${textData.senderName} respondiendo a ${textData.quotedName}`;
+                                }
                             }
                         } else {
-                            // Mensaje normal
-                            narratorPhrase = textData.senderName;
+                            if (textData.senderName !== this.lastSenderName) {
+                                narratorPhrase = textData.senderName;
+                            }
                         }
+
+                        // Actualizamos el último emisor
+                        this.lastSenderName = textData.senderName;
 
                         if (narratorPhrase) {
                             console.log(`[TTS-DEBUG] 🗣️ Narrador anuncia: ${narratorPhrase}`);
                             await this.speak(narratorPhrase, voiceManager.narratorVoice);
-                            await new Promise(r => setTimeout(r, 300));
+                            await new Promise(r => setTimeout(r, 300)); 
                         } else {
-                            console.log(`[TTS-DEBUG] 🗣️ Narrador silenciado (Respuesta a un número sin nombre).`);
+                            console.log(`[TTS-DEBUG] 🗣️ Narrador silenciado (Mismo emisor continuo o respuesta a número).`);
                         }
-
+                        
                         if (this.isPlaying && !this.isSkipping) {
                             console.log(`[TTS-DEBUG] 🗣️ Participante lee el mensaje...`);
                             await this.speak(textData.text, textData.participantVoice);
@@ -224,7 +234,7 @@
                     if (pt) {
                         const m = pt.match(/^\[(.*?)\]\s*(.*?):/);
                         const iterSender = m ? m[2].trim() : null;
-
+                        
                         if (iterSender === rawSender) {
                             const authorNode = current.querySelector('[data-testid="author"]');
                             if (authorNode) {
@@ -234,7 +244,7 @@
                                 return name;
                             }
                         } else if (iterSender && iterSender !== rawSender) {
-                            break;
+                            break; 
                         }
                     }
                 }
@@ -250,11 +260,10 @@
             if (!textContainer) return null;
 
             const preText = textContainer.getAttribute('data-pre-plain-text');
-
+            
             let isReply = false;
             let quotedName = null;
 
-            // Extraemos la información de la cita si existe
             const quoteBlock = row.querySelector('[data-testid="quoted-message"]');
             if (quoteBlock) {
                 isReply = true;
@@ -262,8 +271,7 @@
                 if (authorSpan) {
                     let rawQuoteName = authorSpan.textContent.trim();
                     rawQuoteName = rawQuoteName.replace(/^~\s*/, '');
-
-                    // Verificamos si es solo un número de teléfono (ej: +34 600 123 456)
+                    
                     const isNumber = /^\+?[\d\s\-]{7,}$/.test(rawQuoteName);
                     if (!isNumber && rawQuoteName.length > 0) {
                         quotedName = rawQuoteName;
@@ -271,26 +279,32 @@
                 }
             }
 
-            // Hacemos un clon para extirpar la cita y evitar leer basura o números
             const clone = textContainer.cloneNode(true);
             const quoteInClone = clone.querySelector('[data-testid="quoted-message"]');
             if (quoteInClone) quoteInClone.remove();
+
+            // Extirpamos explícitamente el metadato de la hora si quedó atrapado dentro
+            const metaInClone = clone.querySelector('[data-testid="msg-meta"]');
+            if (metaInClone) metaInClone.remove();
 
             const textNode = clone.querySelector('span.selectable-text') || clone;
 
             if (preText && textNode) {
                 const match = preText.match(/^\[(.*?)\]\s*(.*?):/);
                 const rawSender = match ? match[2].trim() : "Desconocido";
-
+                
                 const senderName = this.resolveSenderName(rawSender, row);
-                const hasLink = !!row.querySelector('a');
-
+                const hasLink = !!row.querySelector('a'); 
+                
                 let text = textNode.innerText || textNode.textContent;
                 text = text.trim();
 
-                return {
-                    text: text,
-                    senderName: senderName,
+                // Regex barredora: elimina cualquier hora residual suelta al final del texto (ej. "11:04 a. m.")
+                text = text.replace(/\s*\d{1,2}:\d{2}\s*(a\.?\s*m\.?|p\.?\s*m\.?|am|pm)?\s*$/i, '');
+
+                return { 
+                    text: text, 
+                    senderName: senderName, 
                     participantVoice: voiceManager.getVoice(rawSender),
                     hasLink: hasLink,
                     isReply: isReply,
@@ -346,7 +360,7 @@
                 const utterance = new SpeechSynthesisUtterance(text);
                 if (voice) utterance.voice = voice;
                 utterance.lang = voice ? voice.lang : 'es-ES';
-                utterance.rate = this.ttsRate;
+                utterance.rate = this.ttsRate; 
 
                 utterance.onend = () => { this.currentResolve = null; resolve(); };
                 utterance.onerror = () => { this.currentResolve = null; resolve(); };
@@ -461,7 +475,7 @@
         initControlPanel();
         initHoverUI();
 
-        console.log("%c[TTS Engine] Listo v1.0.1. Citas extirpadas, números amordazados.", "background: #25D366; color: white; font-weight: bold; padding: 3px;");
+        console.log("%c[TTS Engine] Listo v1.0.2. Narrador fluido y reloj silenciado.", "background: #25D366; color: white; font-weight: bold; padding: 3px;");
     }
 
     const checkExist = setInterval(() => {
